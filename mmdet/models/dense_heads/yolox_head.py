@@ -218,6 +218,7 @@ class YOLOXHead(BaseDenseHead, BBoxTestMixin):
                    cls_scores,
                    bbox_preds,
                    objectnesses,
+                   features,
                    img_metas=None,
                    cfg=None,
                    rescale=False,
@@ -276,10 +277,17 @@ class YOLOXHead(BaseDenseHead, BBoxTestMixin):
             for objectness in objectnesses
         ]
 
+        flatten_features = [
+            feature.permute(0, 2, 3, 1).reshape(num_imgs, -1, features[0].shape[1])
+            for feature in features
+        ]
+
+
         flatten_cls_scores = torch.cat(flatten_cls_scores, dim=1).sigmoid()
         flatten_bbox_preds = torch.cat(flatten_bbox_preds, dim=1)
         flatten_objectness = torch.cat(flatten_objectness, dim=1).sigmoid()
         flatten_priors = torch.cat(mlvl_priors)
+        flatten_features = torch.cat(flatten_features, dim=1)
 
         flatten_bboxes = self._bbox_decode(flatten_priors, flatten_bbox_preds)
 
@@ -292,9 +300,10 @@ class YOLOXHead(BaseDenseHead, BBoxTestMixin):
             cls_scores = flatten_cls_scores[img_id]
             score_factor = flatten_objectness[img_id]
             bboxes = flatten_bboxes[img_id]
-
-            result_list.append(
-                self._bboxes_nms(cls_scores, bboxes, score_factor, cfg))
+            im_features = flatten_features[img_id]
+            result_list.append(self._bboxes_nms(cls_scores, bboxes, score_factor, cfg, im_features))
+            # result_list.append(
+            #     self._bboxes_nms(cls_scores, bboxes, score_factor, cfg))
 
         return result_list
 
@@ -310,19 +319,21 @@ class YOLOXHead(BaseDenseHead, BBoxTestMixin):
         decoded_bboxes = torch.stack([tl_x, tl_y, br_x, br_y], -1)
         return decoded_bboxes
 
-    def _bboxes_nms(self, cls_scores, bboxes, score_factor, cfg):
+    def _bboxes_nms(self, cls_scores, bboxes, score_factor, cfg, features):
         max_scores, labels = torch.max(cls_scores, 1)
         valid_mask = score_factor * max_scores >= cfg.score_thr
 
         bboxes = bboxes[valid_mask]
         scores = max_scores[valid_mask] * score_factor[valid_mask]
         labels = labels[valid_mask]
+        feat = features[valid_mask]
 
         if labels.numel() == 0:
-            return bboxes, labels
+            return bboxes, labels, feat
         else:
             dets, keep = batched_nms(bboxes, scores, labels, cfg.nms)
-            return dets, labels[keep]
+            return dets, labels[keep], feat[keep]
+            #return dets, labels[keep] # vratit keep a valid_mask
 
     @force_fp32(apply_to=('cls_scores', 'bbox_preds', 'objectnesses'))
     def loss(self,
